@@ -69,8 +69,39 @@ class TaigaUserStory(BaseModel):
     permalink: str | None = None
     project_id: int | None = None
     project_slug: str | None = None
+    status_id: int | None = None
     status_name: str | None = None
+    status_color: str | None = None
+    is_closed: bool | None = None
+    created_date: str | None = None
+    modified_date: str | None = None
+    kanban_order: int | None = None
     owner: TaigaUser | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaigaProject(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: int
+    name: str
+    slug: str
+    description: str | None = None
+    is_kanban_activated: bool | None = None
+    owner: TaigaUser | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaigaStatus(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: int
+    name: str
+    slug: str
+    order: int | None = None
+    is_closed: bool | None = None
+    is_archived: bool | None = None
+    color: str | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -1,43 +1,142 @@
 # Taiga Matrix Bridge
 
-Production-style MVP bridge between Taiga and a self-hosted Matrix stack.
+Русскоязычный bridge между Matrix и Taiga для уже работающего self-hosted Matrix/Element стека. Серверный путь проекта сохранён как `/opt/kaiten-matrix-bridge` ради совместимости, но сервис уже полностью работает с Taiga и room widget.
 
-The repository path on the server remains `/opt/kaiten-matrix-bridge` for compatibility, but the code now targets Taiga.
+## Что уже работает
 
-## What it does
+- webhook из Taiga пишет уведомления в Matrix-комнату
+- бот в комнате понимает `!help` и `!task Заголовок | описание`
+- задачи создаются в Taiga как `user story`
+- в комнате встроен self-hosted widget с русским интерфейсом
 
-- Accepts Taiga webhooks and posts readable notifications to Matrix.
-- Runs a Matrix bot that auto-joins invites and listens in mapped rooms.
-- Supports:
-  - `!help`
-  - `!task Title | description`
-- Creates Taiga user stories through the Taiga API.
+## Боевой контур
 
-## Repository layout
+- Element Web: `https://fishingteam.su`
+- Matrix homeserver: `https://matrix.fishingteam.su`
+- Health check bridge: `https://bridge.fishingteam.su/healthz`
+- Widget page: `https://bridge.fishingteam.su/widget/taiga/alpha`
+- Полная доска Taiga: `https://tree.taiga.io/project/denbay0-test/kanban`
+- Комната Matrix: `!EQxiFrVAIdKTSLtAJD:matrix.fishingteam.su`
+- Серверный путь: `/opt/kaiten-matrix-bridge`
 
-```text
-kaiten-matrix-bridge/
-├─ app/
-│  ├─ __init__.py
-│  ├─ main.py
-│  ├─ config.py
-│  ├─ taiga.py
-│  ├─ matrix_bot.py
-│  ├─ formatter.py
-│  └─ models.py
-├─ requirements.txt
-├─ Dockerfile
-├─ compose.yml
-├─ .env.example
-├─ config.example.yaml
-├─ README.md
-├─ .dockerignore
-└─ .gitignore
+## Почему внутри комнаты не встроена сама cloud-доска Taiga
+
+Taiga Cloud запрещает прямое iframe-встраивание страницы доски:
+
+- URL: `https://tree.taiga.io/project/denbay0-test/kanban`
+- blocker: `X-Frame-Options: DENY`
+
+Поэтому bridge использует self-hosted widget page на нашем домене и не пытается обходить защитные заголовки Taiga Cloud.
+
+## Widget в комнате
+
+- URL виджета: `https://bridge.fishingteam.su/widget/taiga/alpha`
+- Widget id: `taiga-alpha-widget`
+- Event type виджета: `im.vector.modular.widgets`
+- Layout event type: `io.element.widgets.layout`
+- Текущее имя в room state: `Taiga Board`
+
+Виджет показывает:
+
+- название и статус проекта
+- кнопку открытия полной доски Taiga
+- список последних задач
+- сводку по статусам
+- форму быстрого создания задачи
+- подсказки, как открыть виджет и как вернуться обратно к чату
+
+## Как открыть виджет в Matrix
+
+Открой комнату проекта и найди виджет `Taiga Board` в панели виджетов/приложений комнаты. В зависимости от версии Element он может быть закреплён сверху или открываться через информацию о комнате.
+
+Если виджет не виден:
+
+1. Открой комнату `!EQxiFrVAIdKTSLtAJD:matrix.fishingteam.su`.
+2. Открой информацию о комнате или секцию widgets/apps.
+3. Выбери `Taiga Board`.
+
+## Как вернуться к чату
+
+Точное название кнопки зависит от версии Element, но логика одна и та же:
+
+1. Сверни или закрой панель виджета.
+2. Либо просто переключись обратно на сообщения комнаты.
+
+Сам widget тоже показывает эти подсказки прямо внутри интерфейса.
+
+## Полезные действия
+
+- открыть полную доску: кнопка `Открыть доску`
+- создать задачу из виджета: форма `Создать задачу`
+- создать задачу из чата: `!task Заголовок | описание`
+- проверить связь с Taiga: создать или изменить user story и дождаться webhook-уведомления в комнате
+
+## Язык интерфейса
+
+Что русифицировано нами:
+
+- сам widget UI
+- кнопки, формы, статусы, пустые состояния и ошибки
+- тексты help/UX внутри страницы виджета
+- обращения bridge к Taiga API через `Accept-Language: ru`
+
+Что не управляется сервером:
+
+- язык самого клиента Element задаётся пользователем в `All Settings -> Account -> Language and Region`
+- текущее имя room widget пока остаётся `Taiga Board`, потому что power policy комнаты требует уровень `50` для state-событий, а локальному техпользователю Synapse смог дать только `0`
+
+## HTTP API
+
+### `GET /healthz`
+
+Возвращает JSON-статус сервиса. `HEAD /healthz` тоже поддерживается.
+
+### `POST /webhook/taiga/{slug}`
+
+Основной режим авторизации webhook из Taiga:
+
+- заголовок `X-TAIGA-WEBHOOK-SIGNATURE`
+- значение `hex(hmac_sha1(raw_body, BRIDGE_SECRET))`
+
+Ручные fallback-варианты для тестов:
+
+- query `?secret=...`
+- либо заголовок `X-Bridge-Secret: ...`
+
+Совместимость со старым URL сохранена:
+
+- `POST /webhook/kaiten/{slug}`
+
+### `GET /widget/taiga/{slug}`
+
+Отдаёт self-hosted HTML widget page, пригодную для встраивания в Element.
+
+### `POST /widget/taiga/{slug}/task`
+
+Создаёт Taiga user story из формы виджета.
+
+Пример JSON:
+
+```json
+{
+  "title": "Тестовая задача",
+  "description": "Описание"
+}
 ```
 
-## Environment variables
+## Команды бота
 
-Copy `.env.example` to `.env` and fill the real values:
+### `!help`
+
+Показывает список доступных команд.
+
+### `!task Заголовок | описание`
+
+Создаёт user story в привязанном проекте Taiga и отвечает ссылкой в ту же комнату.
+
+## Конфигурация
+
+Скопируй `.env.example` в `.env` и заполни реальные значения:
 
 ```env
 TAIGA_BASE_URL=https://tree.taiga.io
@@ -45,8 +144,9 @@ TAIGA_API_URL=https://api.taiga.io/api/v1
 TAIGA_USERNAME=
 TAIGA_PASSWORD=
 TAIGA_TOKEN=
-TAIGA_PROJECT_ID=
-TAIGA_PROJECT_SLUG=
+TAIGA_ACCEPT_LANGUAGE=ru
+TAIGA_PROJECT_ID=1784454
+TAIGA_PROJECT_SLUG=denbay0-test
 
 MATRIX_HOMESERVER=https://matrix.fishingteam.su
 MATRIX_USER_ID=@kbot:matrix.fishingteam.su
@@ -56,144 +156,94 @@ BRIDGE_SECRET=
 LOG_LEVEL=INFO
 CONFIG_PATH=/app/config.yaml
 DATA_DIR=/app/data
+WIDGET_FRAME_ANCESTORS=https://fishingteam.su https://matrix.fishingteam.su
 ```
 
-Notes:
+Замечания:
 
-- `TAIGA_TOKEN` is optional. If set, the bridge uses it directly. Otherwise it logs in with `TAIGA_USERNAME` and `TAIGA_PASSWORD`.
-- `TAIGA_PROJECT_ID` and `TAIGA_PROJECT_SLUG` act as defaults. Per-room values in `config.yaml` override them.
-- `BRIDGE_SECRET` is used both for manual webhook testing and as the Taiga webhook HMAC key.
+- `TAIGA_TOKEN` необязателен
+- если `TAIGA_TOKEN` пустой, bridge логинится через `TAIGA_USERNAME` и `TAIGA_PASSWORD`
+- `TAIGA_ACCEPT_LANGUAGE=ru` просит Taiga API отдавать переводимые части ответа по-русски
+- `WIDGET_FRAME_ANCESTORS` ограничивает, кто может встраивать widget page
 
-## Mapping file
+## `config.yaml`
 
-Copy `config.example.yaml` to `config.yaml` and adjust the room/project mapping:
+Скопируй `config.example.yaml` в `config.yaml` и привяжи комнату к проекту:
 
 ```yaml
 projects:
   alpha:
-    room_id: "!REAL_MATRIX_ROOM_ID:matrix.fishingteam.su"
+    room_id: "!EQxiFrVAIdKTSLtAJD:matrix.fishingteam.su"
     project_id: 1784454
     project_slug: denbay0-test
 ```
 
-Supported project fields:
+Поля:
 
-- `room_id`: Matrix room id where Taiga events are posted.
-- `project_id`: Taiga numeric project id used for `!task`.
-- `project_slug`: Taiga project slug used for link building fallback.
-- `webhook_secret`: optional per-room webhook secret override.
+- `room_id`: комната Matrix для бота и webhook-уведомлений
+- `project_id`: numeric id проекта Taiga
+- `project_slug`: slug проекта для ссылок и widget page
+- `webhook_secret`: необязательный секрет только для этого slug
 
-## Local run
+## Локальный запуск
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
 cp .env.example .env
 cp config.example.yaml config.yaml
+python -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
 uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
 ```
 
-## Docker deployment
-
-Expected server workflow:
+## Деплой на сервер
 
 ```bash
 cd /opt/kaiten-matrix-bridge
-cp .env.example .env
-cp config.example.yaml config.yaml
-nano .env
-nano config.yaml
-docker compose -f compose.yml up -d --build
+docker compose up -d --build
 ```
 
-The service listens on `0.0.0.0:8000` in the container and is published on host port `8060`.
-
-## Reverse proxy via Caddy
-
-The bridge is exposed through the existing Caddy instance in `/opt/matrix-stack/caddy/Caddyfile`:
-
-```caddy
-bridge.fishingteam.su {
-    reverse_proxy host.docker.internal:8060
-}
-```
-
-If you change the Caddyfile, restart Caddy:
+Если на сервере снова будут проблемы с pull базового образа, можно использовать уже проверенный fallback:
 
 ```bash
-cd /opt/matrix-stack
-docker compose restart caddy
+cd /opt/kaiten-matrix-bridge
+docker build -f Dockerfile.localbase -t kaiten-matrix-bridge-kaiten-matrix-bridge:latest .
+docker compose up -d --force-recreate
 ```
 
-## Matrix bot behavior
+## Операционные команды
 
-- Uses a dedicated Matrix account such as `@kbot:matrix.fishingteam.su`.
-- Auto-joins invited rooms.
-- Ignores its own messages.
-- Reacts only in rooms listed in `config.yaml`.
-- Intended for a non-encrypted room for the MVP.
-
-Create the Matrix bot account if needed:
+### Запуск / пересборка
 
 ```bash
-cd /opt/matrix-stack
-docker compose exec synapse register_new_matrix_user \
-  http://localhost:8008 \
-  -c /data/homeserver.yaml
+cd /opt/kaiten-matrix-bridge
+docker compose up -d --build
 ```
 
-## HTTP API
+### Логи
 
-### `GET /healthz`
-
-Returns JSON health status.
-
-`HEAD /healthz` is also supported.
-
-### `POST /webhook/taiga/{slug}`
-
-Primary auth mode for real Taiga webhooks:
-
-- header `X-TAIGA-WEBHOOK-SIGNATURE`
-- value is `hex(hmac_sha1(raw_body, BRIDGE_SECRET))`
-
-Fallback auth modes for manual testing:
-
-- query string `?secret=...`
-- or header `X-Bridge-Secret: ...`
-
-Compatibility alias:
-
-- `POST /webhook/kaiten/{slug}` points to the same handler
-
-Example Matrix output:
-
-```text
-[Taiga] created user story: #72 Demo story - denbay0
-https://tree.taiga.io/project/denbay0-test/us/72
+```bash
+cd /opt/kaiten-matrix-bridge
+docker compose logs -f
 ```
 
-## Matrix commands
+### Перезапуск
 
-### `!help`
-
-Shows the available commands.
-
-### `!task Title | description`
-
-Creates a Taiga user story in the mapped project and replies with:
-
-```text
-Created Taiga user story #72: Demo story
-https://tree.taiga.io/project/denbay0-test/us/72
+```bash
+cd /opt/kaiten-matrix-bridge
+docker compose restart
 ```
 
-## How to get Taiga token and project id
+### Остановка
 
-### Auth token
+```bash
+cd /opt/kaiten-matrix-bridge
+docker compose down
+```
 
-Official Taiga auth flow:
+## Как получить auth и project id в Taiga
+
+### Получить auth token
 
 ```bash
 curl -X POST https://api.taiga.io/api/v1/auth \
@@ -205,139 +255,56 @@ curl -X POST https://api.taiga.io/api/v1/auth \
   }'
 ```
 
-The response contains `auth_token`. You can set that token in `TAIGA_TOKEN` if you prefer token-based auth for the bridge.
-
-### Project id
-
-Resolver by slug:
+### Узнать project id по slug
 
 ```bash
 curl "https://api.taiga.io/api/v1/resolver?project=YOUR_PROJECT_SLUG"
 ```
 
-Example response:
+Пример ответа:
 
 ```json
 {"project": 1784454}
 ```
 
-You can also fetch full public project metadata:
+## Как настроить webhook в Taiga
 
-```bash
-curl "https://api.taiga.io/api/v1/projects/by_slug?slug=YOUR_PROJECT_SLUG"
+Используй URL:
+
+```text
+https://bridge.fishingteam.su/webhook/taiga/alpha
 ```
 
-## Manual webhook test
-
-Quick secret-based test:
-
-```bash
-curl -X POST "https://bridge.fishingteam.su/webhook/taiga/alpha?secret=YOUR_BRIDGE_SECRET" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "userstory",
-    "action": "create",
-    "data": {
-      "ref": 72,
-      "subject": "Manual webhook test",
-      "permalink": "https://tree.taiga.io/project/denbay0-test/us/72"
-    },
-    "by": {
-      "username": "denbay0"
-    }
-  }'
-```
-
-Real HMAC-style test:
-
-```bash
-BODY='{"type":"userstory","action":"create","data":{"ref":72,"subject":"Manual webhook test","permalink":"https://tree.taiga.io/project/denbay0-test/us/72"},"by":{"username":"denbay0"}}'
-SIG=$(printf '%s' "$BODY" | openssl dgst -sha1 -hmac "$BRIDGE_SECRET" -hex | sed 's/^.* //')
-curl -X POST "https://bridge.fishingteam.su/webhook/taiga/alpha" \
-  -H "Content-Type: application/json" \
-  -H "X-TAIGA-WEBHOOK-SIGNATURE: $SIG" \
-  -d "$BODY"
-```
+В поле `key` в Taiga укажи то же значение, что и `BRIDGE_SECRET` в `.env` bridge.
 
 ## Smoke test
 
-### 1. Health
+### Health
 
 ```bash
 curl https://bridge.fishingteam.su/healthz
-curl -I https://bridge.fishingteam.su/healthz
+curl -I https://bridge.fishingteam.su/widget/taiga/alpha
 ```
 
-### 2. Matrix bot
+### Проверка в Matrix
 
-Invite `@kbot:matrix.fishingteam.su` to the target room if it is not there yet.
-
-### 3. Matrix commands
-
-In the mapped Matrix room:
+В комнате отправь:
 
 ```text
 !help
-!task Test from Matrix | created by the bridge
+!task Тестовая задача | проверить bridge
 ```
 
-Expected result:
+### Проверка widget
 
-- bot replies in the room
-- Taiga user story is created
-- reply contains a working Taiga link
+Открой:
 
-### 4. Taiga webhook
-
-Configure a Taiga webhook with:
-
-- URL: `https://bridge.fishingteam.su/webhook/taiga/alpha`
-- secret key: same value as `BRIDGE_SECRET` or `projects.alpha.webhook_secret`
-
-Then create or update a user story in Taiga and verify the Matrix room receives a notification.
-
-## Operational commands
-
-### Build / start
-
-```bash
-cd /opt/kaiten-matrix-bridge
-docker compose -f compose.yml up -d --build
+```text
+https://bridge.fishingteam.su/widget/taiga/alpha
 ```
 
-### View logs
+Затем создай задачу через форму.
 
-```bash
-cd /opt/kaiten-matrix-bridge
-docker compose -f compose.yml logs -f
-```
+### Проверка webhook
 
-### Restart
-
-```bash
-cd /opt/kaiten-matrix-bridge
-docker compose -f compose.yml restart
-```
-
-### Stop
-
-```bash
-cd /opt/kaiten-matrix-bridge
-docker compose -f compose.yml down
-```
-
-## Exact server location
-
-- Bridge code: `/opt/kaiten-matrix-bridge`
-- Caddy config: `/opt/matrix-stack/caddy/Caddyfile`
-- Existing Caddy backup: `/opt/matrix-stack/caddy/Caddyfile.bak.kaiten-bridge`
-
-## Extending after MVP
-
-The code is intentionally split into small modules so the next features fit cleanly:
-
-- `!comment <us_ref> | text`
-- `!move <us_ref> | status`
-- richer webhook formatting
-- Matrix user to Taiga user mapping
-- tests for command parsing and webhook normalization
+Создай или измени user story в проекте Taiga и убедись, что в комнате приходит уведомление `[Taiga] ...`.

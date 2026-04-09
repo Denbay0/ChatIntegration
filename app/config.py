@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     taiga_username: str | None = None
     taiga_password: SecretStr | None = None
     taiga_token: SecretStr | None = None
+    taiga_accept_language: str = "ru"
     taiga_project_id: int | None = None
     taiga_project_slug: str | None = None
 
@@ -34,6 +35,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     config_path: Path = Field(default=Path("config.yaml"))
     data_dir: Path = Field(default=Path("data"))
+    widget_frame_ancestors: str = "https://fishingteam.su https://matrix.fishingteam.su"
 
     @field_validator("taiga_api_url")
     @classmethod
@@ -56,6 +58,12 @@ class Settings(BaseSettings):
         if value is None:
             return None
         return value.strip().strip("/")
+
+    @field_validator("taiga_accept_language")
+    @classmethod
+    def normalize_taiga_accept_language(cls, value: str) -> str:
+        normalized = value.strip()
+        return normalized or "ru"
 
 
 def load_bridge_config(path: Path) -> BridgeConfig:

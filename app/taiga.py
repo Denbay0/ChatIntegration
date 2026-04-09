@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from app.models import ProjectMapping, TaigaUser, TaigaUserStory
+from app.models import ProjectMapping, TaigaProject, TaigaStatus, TaigaUser, TaigaUserStory
 
 LOGGER = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ class TaigaClient:
         username: str | None = None,
         password: str | None = None,
         token: str | None = None,
+        accept_language: str = "ru",
         default_project_id: int | None = None,
         default_project_slug: str | None = None,
         timeout: float = 20.0,
@@ -45,6 +46,7 @@ class TaigaClient:
             follow_redirects=True,
             headers={
                 "Accept": "application/json",
+                "Accept-Language": accept_language,
                 "User-Agent": "taiga-matrix-bridge/1.0",
             },
         )
@@ -78,6 +80,60 @@ class TaigaClient:
             fallback_project_id=project_id,
             fallback_project_slug=project_slug,
         )
+
+    async def get_project(self, project: ProjectMapping) -> TaigaProject:
+        project_id, project_slug = await self._resolve_project_context(project)
+        if project_slug:
+            data = await self.get_project_by_slug(project_slug)
+        else:
+            data = await self._request("GET", f"/projects/{project_id}", auth=True)
+
+        if not isinstance(data, dict):
+            raise TaigaApiError("Unexpected Taiga project payload.")
+
+        return self._parse_project(data, fallback_project_id=project_id, fallback_project_slug=project_slug)
+
+    async def list_user_story_statuses(self, project: ProjectMapping) -> list[TaigaStatus]:
+        project_id, _ = await self._resolve_project_context(project)
+        data = await self._request(
+            "GET",
+            "/userstory-statuses",
+            auth=True,
+            params={"project": project_id},
+        )
+        if not isinstance(data, list):
+            raise TaigaApiError("Unexpected user story status payload from Taiga.")
+
+        statuses = [self._parse_status(item) for item in data if isinstance(item, dict)]
+        return sorted(statuses, key=lambda status: status.order or 0)
+
+    async def list_user_stories(
+        self,
+        project: ProjectMapping,
+        *,
+        limit: int = 50,
+    ) -> list[TaigaUserStory]:
+        project_id, project_slug = await self._resolve_project_context(project)
+        data = await self._request(
+            "GET",
+            "/userstories",
+            auth=True,
+            params={"project": project_id},
+        )
+        if not isinstance(data, list):
+            raise TaigaApiError("Unexpected user story list payload from Taiga.")
+
+        stories = [
+            self._parse_user_story(
+                item,
+                fallback_project_id=project_id,
+                fallback_project_slug=project_slug,
+            )
+            for item in data
+            if isinstance(item, dict)
+        ]
+        stories.sort(key=lambda story: story.modified_date or story.created_date or "", reverse=True)
+        return stories[:limit]
 
     async def resolve_project_id(self, project_slug: str) -> int:
         data = await self._request("GET", "/resolver", auth=False, params={"project": project_slug})
@@ -265,7 +321,7 @@ class TaigaClient:
         fallback_project_id: int | None,
         fallback_project_slug: str | None,
     ) -> TaigaUserStory:
-        owner_payload = payload.get("owner")
+        owner_payload = payload.get("owner_extra_info") or payload.get("owner")
         owner = TaigaUser.model_validate(owner_payload) if isinstance(owner_payload, dict) else None
 
         permalink = _string_or_none(payload.get("permalink"))
@@ -281,7 +337,10 @@ class TaigaClient:
             or fallback_project_id
             or self.default_project_id
         )
-        status_name = _string_or_none((payload.get("status_extra_info") or {}).get("name"))
+        status_payload = payload.get("status_extra_info") or {}
+        status_name = _string_or_none(status_payload.get("name"))
+        status_color = _string_or_none(status_payload.get("color"))
+        status_id = _maybe_int(payload.get("status"))
 
         ref = _maybe_int(payload.get("ref")) or _maybe_int(payload.get("id"))
         if ref is None:
@@ -306,8 +365,73 @@ class TaigaClient:
             permalink=permalink,
             project_id=project_id,
             project_slug=project_slug,
+            status_id=status_id,
             status_name=status_name,
+            status_color=status_color,
+            is_closed=_maybe_bool(payload.get("is_closed")),
+            created_date=_string_or_none(payload.get("created_date")),
+            modified_date=_string_or_none(payload.get("modified_date")),
+            kanban_order=_maybe_int(payload.get("kanban_order")),
             owner=owner,
+            raw=payload,
+        )
+
+    async def _resolve_project_context(self, project: ProjectMapping) -> tuple[int, str | None]:
+        project_id = project.resolved_project_id(self.default_project_id)
+        project_slug = project.resolved_project_slug(self.default_project_slug)
+        if project_id is None and project_slug:
+            project_id = await self.resolve_project_id(project_slug)
+        if project_id is None:
+            raise TaigaApiError("Taiga project id is not configured.")
+        return project_id, project_slug
+
+    def _parse_project(
+        self,
+        payload: dict[str, Any],
+        *,
+        fallback_project_id: int | None,
+        fallback_project_slug: str | None,
+    ) -> TaigaProject:
+        owner_payload = payload.get("owner")
+        owner = TaigaUser.model_validate(owner_payload) if isinstance(owner_payload, dict) else None
+
+        project_id = _maybe_int(payload.get("id")) or fallback_project_id
+        if project_id is None:
+            raise TaigaApiError("Taiga project response did not include id.", payload=payload)
+
+        name = _string_or_none(payload.get("name"))
+        if not name:
+            raise TaigaApiError("Taiga project response did not include name.", payload=payload)
+
+        slug = _string_or_none(payload.get("slug")) or fallback_project_slug
+        if not slug:
+            raise TaigaApiError("Taiga project response did not include slug.", payload=payload)
+
+        return TaigaProject(
+            id=project_id,
+            name=name,
+            slug=slug,
+            description=_string_or_none(payload.get("description")),
+            is_kanban_activated=_maybe_bool(payload.get("is_kanban_activated")),
+            owner=owner,
+            raw=payload,
+        )
+
+    def _parse_status(self, payload: dict[str, Any]) -> TaigaStatus:
+        status_id = _maybe_int(payload.get("id"))
+        name = _string_or_none(payload.get("name"))
+        slug = _string_or_none(payload.get("slug"))
+        if status_id is None or not name or not slug:
+            raise TaigaApiError("Unexpected Taiga status payload.", payload=payload)
+
+        return TaigaStatus(
+            id=status_id,
+            name=name,
+            slug=slug,
+            order=_maybe_int(payload.get("order")),
+            is_closed=_maybe_bool(payload.get("is_closed")),
+            is_archived=_maybe_bool(payload.get("is_archived")),
+            color=_string_or_none(payload.get("color")),
             raw=payload,
         )
 
@@ -335,6 +459,12 @@ def _string_or_none(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _maybe_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    return None
 
 
 def _extract_project_slug_from_payload(payload: dict[str, Any]) -> str | None:

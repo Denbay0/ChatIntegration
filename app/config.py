@@ -18,9 +18,13 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    kaiten_api_base_url: str
-    kaiten_web_base_url: str
-    kaiten_token: SecretStr
+    taiga_base_url: str = "https://tree.taiga.io"
+    taiga_api_url: str = "https://api.taiga.io/api/v1"
+    taiga_username: str | None = None
+    taiga_password: SecretStr | None = None
+    taiga_token: SecretStr | None = None
+    taiga_project_id: int | None = None
+    taiga_project_slug: str | None = None
 
     matrix_homeserver: str = "https://matrix.fishingteam.su"
     matrix_user_id: str = "@kbot:matrix.fishingteam.su"
@@ -31,20 +35,27 @@ class Settings(BaseSettings):
     config_path: Path = Field(default=Path("config.yaml"))
     data_dir: Path = Field(default=Path("data"))
 
-    @field_validator("kaiten_api_base_url")
+    @field_validator("taiga_api_url")
     @classmethod
-    def normalize_kaiten_api_base_url(cls, value: str) -> str:
+    def normalize_taiga_api_url(cls, value: str) -> str:
         trimmed = value.rstrip("/")
         parsed = urlparse(trimmed)
         if "/api/" in parsed.path:
             return trimmed
-        suffix = "/api/latest" if parsed.path in ("", "/") else f"{parsed.path}/api/latest"
+        suffix = "/api/v1" if parsed.path in ("", "/") else f"{parsed.path}/api/v1"
         return parsed._replace(path=suffix).geturl().rstrip("/")
 
-    @field_validator("kaiten_web_base_url", "matrix_homeserver")
+    @field_validator("taiga_base_url", "matrix_homeserver")
     @classmethod
     def trim_trailing_slash(cls, value: str) -> str:
         return value.rstrip("/")
+
+    @field_validator("taiga_project_slug")
+    @classmethod
+    def normalize_taiga_project_slug(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip().strip("/")
 
 
 def load_bridge_config(path: Path) -> BridgeConfig:

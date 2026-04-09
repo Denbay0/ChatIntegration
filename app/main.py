@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -10,9 +12,9 @@ from fastapi.responses import JSONResponse
 
 from app.config import Settings, load_bridge_config, setup_logging
 from app.formatter import format_webhook_message, normalize_webhook_event
-from app.kaiten import KaitenClient
 from app.matrix_bot import MatrixBot
 from app.models import BridgeConfig, ProjectMapping
+from app.taiga import TaigaClient
 
 LOGGER = logging.getLogger(__name__)
 
@@ -21,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 class BridgeRuntime:
     settings: Settings
     bridge_config: BridgeConfig
-    kaiten_client: KaitenClient
+    taiga_client: TaigaClient
     matrix_bot: MatrixBot
 
 
@@ -31,21 +33,25 @@ def create_app() -> FastAPI:
         settings = Settings()
         setup_logging(settings.log_level)
         bridge_config = load_bridge_config(settings.config_path)
-        kaiten_client = KaitenClient(
-            base_url=settings.kaiten_api_base_url,
-            web_base_url=settings.kaiten_web_base_url,
-            token=settings.kaiten_token.get_secret_value(),
+        taiga_client = TaigaClient(
+            api_url=settings.taiga_api_url,
+            base_url=settings.taiga_base_url,
+            username=settings.taiga_username,
+            password=settings.taiga_password.get_secret_value() if settings.taiga_password else None,
+            token=settings.taiga_token.get_secret_value() if settings.taiga_token else None,
+            default_project_id=settings.taiga_project_id,
+            default_project_slug=settings.taiga_project_slug,
         )
         matrix_bot = MatrixBot(
             settings=settings,
             bridge_config=bridge_config,
-            kaiten_client=kaiten_client,
+            taiga_client=taiga_client,
         )
 
         runtime = BridgeRuntime(
             settings=settings,
             bridge_config=bridge_config,
-            kaiten_client=kaiten_client,
+            taiga_client=taiga_client,
             matrix_bot=matrix_bot,
         )
         app.state.runtime = runtime
@@ -55,11 +61,11 @@ def create_app() -> FastAPI:
             yield
         finally:
             await matrix_bot.stop()
-            await kaiten_client.close()
+            await taiga_client.close()
 
-    app = FastAPI(title="Kaiten Matrix Bridge", lifespan=lifespan)
+    app = FastAPI(title="Taiga Matrix Bridge", lifespan=lifespan)
 
-    @app.get("/healthz")
+    @app.api_route("/healthz", methods=["GET", "HEAD"])
     async def healthz(request: Request) -> JSONResponse:
         runtime = _runtime_from_request(request)
         status_code = 200 if runtime.matrix_bot.is_running else 503
@@ -72,21 +78,29 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.post("/webhook/taiga/{slug}")
     @app.post("/webhook/kaiten/{slug}")
-    async def kaiten_webhook(
+    async def taiga_webhook(
         slug: str,
         request: Request,
         x_bridge_secret: str | None = Header(default=None, alias="X-Bridge-Secret"),
+        x_taiga_webhook_signature: str | None = Header(
+            default=None,
+            alias="X-TAIGA-WEBHOOK-SIGNATURE",
+        ),
     ) -> dict[str, Any]:
         runtime = _runtime_from_request(request)
         project = runtime.bridge_config.get_project(slug)
         if project is None:
             raise HTTPException(status_code=404, detail="Unknown webhook slug")
 
-        _validate_secret(
+        body = await request.body()
+        _validate_webhook_auth(
             project=project,
             request=request,
+            body=body,
             header_secret=x_bridge_secret,
+            taiga_signature=x_taiga_webhook_signature,
             global_secret=runtime.settings.bridge_secret.get_secret_value(),
         )
 
@@ -100,13 +114,22 @@ def create_app() -> FastAPI:
 
         normalized_event = normalize_webhook_event(
             payload=payload,
-            web_base_url=runtime.settings.kaiten_web_base_url,
+            web_base_url=runtime.settings.taiga_base_url,
         )
         message = format_webhook_message(normalized_event)
         await runtime.matrix_bot.send_notice(project.room_id, message)
 
-        LOGGER.info("Forwarded Kaiten webhook for slug=%s event=%s", slug, normalized_event.event_name)
-        return {"status": "ok", "event": normalized_event.event_name}
+        LOGGER.info(
+            "Forwarded Taiga webhook for slug=%s type=%s action=%s",
+            slug,
+            normalized_event.entity_type,
+            normalized_event.action,
+        )
+        return {
+            "status": "ok",
+            "type": normalized_event.entity_type,
+            "action": normalized_event.action,
+        }
 
     return app
 
@@ -118,13 +141,23 @@ def _runtime_from_request(request: Request) -> BridgeRuntime:
     return runtime
 
 
-def _validate_secret(
+def _validate_webhook_auth(
     project: ProjectMapping,
     request: Request,
+    body: bytes,
     header_secret: str | None,
+    taiga_signature: str | None,
     global_secret: str,
 ) -> None:
-    provided_secret = request.query_params.get("secret") or header_secret
     expected_secret = project.webhook_secret or global_secret
-    if not provided_secret or provided_secret != expected_secret:
-        raise HTTPException(status_code=401, detail="Invalid bridge secret")
+    if taiga_signature:
+        mac = hmac.new(expected_secret.encode("utf-8"), msg=body, digestmod=hashlib.sha1)
+        if not hmac.compare_digest(mac.hexdigest(), taiga_signature):
+            raise HTTPException(status_code=401, detail="Invalid Taiga webhook signature")
+        return
+
+    provided_secret = request.query_params.get("secret") or header_secret
+    if provided_secret and hmac.compare_digest(provided_secret, expected_secret):
+        return
+
+    raise HTTPException(status_code=401, detail="Missing or invalid webhook authentication")

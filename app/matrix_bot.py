@@ -21,22 +21,20 @@ from app.config import Settings
 from app.formatter import (
     MatrixMessage,
     build_help_message,
-    format_card_lookup_message,
-    format_created_card_message,
-    parse_card_command,
+    format_created_user_story_message,
     parse_task_command,
 )
-from app.kaiten import KaitenApiError, KaitenClient
 from app.models import BridgeConfig
+from app.taiga import TaigaApiError, TaigaClient
 
 LOGGER = logging.getLogger(__name__)
 
 
 class MatrixBot:
-    def __init__(self, settings: Settings, bridge_config: BridgeConfig, kaiten_client: KaitenClient) -> None:
+    def __init__(self, settings: Settings, bridge_config: BridgeConfig, taiga_client: TaigaClient) -> None:
         self.settings = settings
         self.bridge_config = bridge_config
-        self.kaiten_client = kaiten_client
+        self.taiga_client = taiga_client
         self.client: AsyncClient | None = None
         self._sync_task: asyncio.Task[None] | None = None
         self._ready = asyncio.Event()
@@ -54,14 +52,14 @@ class MatrixBot:
         self.client = AsyncClient(
             homeserver=self.settings.matrix_homeserver,
             user=self.settings.matrix_user_id,
-            device_id="KAITENBRIDGE",
+            device_id="TAIGABRIDGE",
             store_path=str(self.settings.data_dir / "nio-store"),
             config=client_config,
         )
 
         login_response = await self.client.login(
             password=self.settings.matrix_password.get_secret_value(),
-            device_name="kaiten-matrix-bridge",
+            device_name="taiga-matrix-bridge",
         )
 
         if isinstance(login_response, LoginError):
@@ -169,9 +167,9 @@ class MatrixBot:
             reply = await self._dispatch_command(room.room_id, message)
         except ValueError as exc:
             reply = MatrixMessage(body=str(exc))
-        except KaitenApiError as exc:
-            LOGGER.warning("Kaiten command failed: %s payload=%s", exc, exc.payload)
-            reply = MatrixMessage(body=f"Kaiten API error: {exc}")
+        except TaigaApiError as exc:
+            LOGGER.warning("Taiga command failed: %s payload=%s", exc, exc.payload)
+            reply = MatrixMessage(body=f"Taiga API error: {exc}")
         except Exception:
             LOGGER.exception("Unexpected error while handling Matrix command")
             reply = MatrixMessage(body="Unexpected bridge error while processing the command.")
@@ -190,17 +188,12 @@ class MatrixBot:
 
         if message.startswith("!task"):
             command = parse_task_command(message)
-            card = await self.kaiten_client.create_card(
+            story = await self.taiga_client.create_user_story(
                 project=project,
                 title=command.title,
                 description=command.description,
             )
-            return format_created_card_message(card, self.kaiten_client.card_url(card.id))
-
-        if message.startswith("!card"):
-            command = parse_card_command(message)
-            card = await self.kaiten_client.get_card(command.card_id)
-            return format_card_lookup_message(card, self.kaiten_client.card_url(card.id))
+            return format_created_user_story_message(story, self.taiga_client.base_url)
 
         raise ValueError("Unsupported command. Send !help to see available commands.")
 

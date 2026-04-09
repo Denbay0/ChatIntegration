@@ -1,1 +1,1 @@
-"""Kaiten <-> Matrix bridge."""
+"""Taiga <-> Matrix bridge."""

@@ -1,0 +1,362 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any
+
+import httpx
+
+from app.models import ProjectMapping, TaigaUser, TaigaUserStory
+
+LOGGER = logging.getLogger(__name__)
+
+
+class TaigaApiError(RuntimeError):
+    def __init__(self, message: str, status_code: int | None = None, payload: Any | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.payload = payload
+
+
+class TaigaClient:
+    def __init__(
+        self,
+        api_url: str,
+        base_url: str,
+        username: str | None = None,
+        password: str | None = None,
+        token: str | None = None,
+        default_project_id: int | None = None,
+        default_project_slug: str | None = None,
+        timeout: float = 20.0,
+    ) -> None:
+        self.api_url = api_url.rstrip("/")
+        self.base_url = base_url.rstrip("/")
+        self.username = username
+        self.password = password
+        self.default_project_id = default_project_id
+        self.default_project_slug = default_project_slug
+        self._access_token = token.strip() if token else None
+        self._refresh_token: str | None = None
+        self._auth_lock = asyncio.Lock()
+        self._client = httpx.AsyncClient(
+            base_url=self.api_url,
+            timeout=timeout,
+            follow_redirects=True,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "taiga-matrix-bridge/1.0",
+            },
+        )
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+    async def create_user_story(
+        self,
+        project: ProjectMapping,
+        title: str,
+        description: str | None = None,
+    ) -> TaigaUserStory:
+        project_id = project.resolved_project_id(self.default_project_id)
+        project_slug = project.resolved_project_slug(self.default_project_slug)
+        if project_id is None and project_slug:
+            project_id = await self.resolve_project_id(project_slug)
+        if project_id is None:
+            raise TaigaApiError("Taiga project id is not configured.")
+
+        payload: dict[str, Any] = {
+            "project": project_id,
+            "subject": title,
+        }
+        if description:
+            payload["description"] = description
+
+        data = await self._request("POST", "/userstories", auth=True, json=payload)
+        return self._parse_user_story(
+            data,
+            fallback_project_id=project_id,
+            fallback_project_slug=project_slug,
+        )
+
+    async def resolve_project_id(self, project_slug: str) -> int:
+        data = await self._request("GET", "/resolver", auth=False, params={"project": project_slug})
+        project_id = data.get("project")
+        if project_id is None:
+            raise TaigaApiError(f"Could not resolve Taiga project id for slug '{project_slug}'.")
+        return int(project_id)
+
+    async def get_project_by_slug(self, project_slug: str) -> dict[str, Any]:
+        data = await self._request(
+            "GET",
+            "/projects/by_slug",
+            auth=False,
+            params={"slug": project_slug},
+        )
+        if not isinstance(data, dict):
+            raise TaigaApiError(f"Unexpected project payload for slug '{project_slug}'.")
+        return data
+
+    async def list_webhooks(self, project_id: int) -> list[dict[str, Any]]:
+        data = await self._request(
+            "GET",
+            "/webhooks",
+            auth=True,
+            params={"project": project_id},
+        )
+        if not isinstance(data, list):
+            raise TaigaApiError("Unexpected webhook list payload from Taiga.")
+        return [item for item in data if isinstance(item, dict)]
+
+    async def ensure_webhook(
+        self,
+        project_id: int,
+        name: str,
+        url: str,
+        key: str,
+    ) -> dict[str, Any]:
+        for webhook in await self.list_webhooks(project_id):
+            if webhook.get("url") == url or webhook.get("name") == name:
+                updates: dict[str, Any] = {}
+                if webhook.get("name") != name:
+                    updates["name"] = name
+                if webhook.get("url") != url:
+                    updates["url"] = url
+                if webhook.get("key") != key:
+                    updates["key"] = key
+
+                if updates:
+                    updated = await self._request(
+                        "PATCH",
+                        f"/webhooks/{webhook['id']}",
+                        auth=True,
+                        json=updates,
+                    )
+                    if not isinstance(updated, dict):
+                        raise TaigaApiError("Unexpected webhook update payload from Taiga.")
+                    return updated
+                return webhook
+
+        created = await self._request(
+            "POST",
+            "/webhooks",
+            auth=True,
+            json={
+                "project": project_id,
+                "name": name,
+                "url": url,
+                "key": key,
+            },
+        )
+        if not isinstance(created, dict):
+            raise TaigaApiError("Unexpected webhook create payload from Taiga.")
+        return created
+
+    async def test_webhook(self, webhook_id: int) -> dict[str, Any]:
+        data = await self._request("POST", f"/webhooks/{webhook_id}/test", auth=True)
+        if not isinstance(data, dict):
+            raise TaigaApiError("Unexpected webhook test payload from Taiga.")
+        return data
+
+    async def authenticate(self, force: bool = False) -> str:
+        async with self._auth_lock:
+            return await self._authenticate_without_lock(force=force)
+
+    async def refresh_auth_token(self) -> str:
+        async with self._auth_lock:
+            if not self._refresh_token:
+                return await self._authenticate_without_lock(force=True)
+
+            response = await self._client.post(
+                "/auth/refresh",
+                json={"refresh": self._refresh_token},
+            )
+            data = self._decode_response(response)
+
+            if response.status_code >= 400:
+                LOGGER.warning(
+                    "Taiga refresh token failed with HTTP %s; falling back to login",
+                    response.status_code,
+                )
+                self._access_token = None
+                self._refresh_token = None
+                return await self._authenticate_without_lock(force=True)
+
+            if not isinstance(data, dict) or not data.get("auth_token"):
+                raise TaigaApiError("Taiga refresh response did not include auth_token.", payload=data)
+
+            self._access_token = str(data["auth_token"])
+            refresh_token = data.get("refresh")
+            if refresh_token:
+                self._refresh_token = str(refresh_token)
+            return self._access_token
+
+    async def _authenticate_without_lock(self, force: bool) -> str:
+        if self._access_token and not force:
+            return self._access_token
+
+        if not self.username or not self.password:
+            raise TaigaApiError(
+                "Taiga credentials are missing. Set TAIGA_TOKEN or TAIGA_USERNAME and TAIGA_PASSWORD."
+            )
+
+        response = await self._client.post(
+            "/auth",
+            json={
+                "type": "normal",
+                "username": self.username,
+                "password": self.password,
+            },
+        )
+        data = self._decode_response(response)
+
+        if response.status_code >= 400:
+            raise TaigaApiError(
+                "Taiga authentication failed.",
+                status_code=response.status_code,
+                payload=data,
+            )
+
+        if not isinstance(data, dict) or not data.get("auth_token"):
+            raise TaigaApiError("Taiga auth response did not include auth_token.", payload=data)
+
+        self._access_token = str(data["auth_token"])
+        refresh_token = data.get("refresh")
+        self._refresh_token = str(refresh_token) if refresh_token else None
+        return self._access_token
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        auth: bool,
+        retry_on_401: bool = True,
+        **kwargs: Any,
+    ) -> Any:
+        headers = dict(kwargs.pop("headers", {}))
+        if auth:
+            headers["Authorization"] = f"Bearer {await self.authenticate()}"
+        if "json" in kwargs:
+            headers.setdefault("Content-Type", "application/json")
+
+        try:
+            response = await self._client.request(method, path, headers=headers, **kwargs)
+        except httpx.HTTPError as exc:
+            raise TaigaApiError(f"Request to Taiga failed: {exc}") from exc
+
+        if response.status_code == 401 and auth and retry_on_401:
+            headers["Authorization"] = f"Bearer {await self.refresh_auth_token()}"
+            response = await self._client.request(method, path, headers=headers, **kwargs)
+
+        data = self._decode_response(response)
+        if response.status_code >= 400:
+            raise TaigaApiError(
+                f"Taiga API returned HTTP {response.status_code}",
+                status_code=response.status_code,
+                payload=data,
+            )
+        return data
+
+    def _parse_user_story(
+        self,
+        payload: dict[str, Any],
+        *,
+        fallback_project_id: int | None,
+        fallback_project_slug: str | None,
+    ) -> TaigaUserStory:
+        owner_payload = payload.get("owner")
+        owner = TaigaUser.model_validate(owner_payload) if isinstance(owner_payload, dict) else None
+
+        permalink = _string_or_none(payload.get("permalink"))
+        project_slug = (
+            fallback_project_slug
+            or _extract_project_slug_from_permalink(permalink)
+            or _extract_project_slug_from_payload(payload)
+            or self.default_project_slug
+        )
+        project_id = (
+            _maybe_int(payload.get("project"))
+            or _maybe_int((payload.get("project_extra_info") or {}).get("id"))
+            or fallback_project_id
+            or self.default_project_id
+        )
+        status_name = _string_or_none((payload.get("status_extra_info") or {}).get("name"))
+
+        ref = _maybe_int(payload.get("ref")) or _maybe_int(payload.get("id"))
+        if ref is None:
+            raise TaigaApiError("Taiga user story response did not include ref/id.", payload=payload)
+
+        story_id = _maybe_int(payload.get("id"))
+        if story_id is None:
+            raise TaigaApiError("Taiga user story response did not include id.", payload=payload)
+
+        subject = _string_or_none(payload.get("subject"))
+        if not subject:
+            raise TaigaApiError("Taiga user story response did not include subject.", payload=payload)
+
+        if not permalink:
+            permalink = _build_user_story_permalink(self.base_url, project_slug, ref)
+
+        return TaigaUserStory(
+            id=story_id,
+            ref=ref,
+            subject=subject,
+            description=_string_or_none(payload.get("description")),
+            permalink=permalink,
+            project_id=project_id,
+            project_slug=project_slug,
+            status_name=status_name,
+            owner=owner,
+            raw=payload,
+        )
+
+    @staticmethod
+    def _decode_response(response: httpx.Response) -> Any:
+        if response.status_code == 204:
+            return {}
+        try:
+            return response.json()
+        except ValueError:
+            return response.text
+
+
+def _maybe_int(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _string_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _extract_project_slug_from_payload(payload: dict[str, Any]) -> str | None:
+    project = payload.get("project_extra_info")
+    if isinstance(project, dict):
+        slug = _string_or_none(project.get("slug"))
+        if slug:
+            return slug
+    return None
+
+
+def _extract_project_slug_from_permalink(permalink: str | None) -> str | None:
+    if not permalink or "/project/" not in permalink:
+        return None
+    project_path = permalink.split("/project/", 1)[1]
+    parts = [part for part in project_path.split("/") if part]
+    if not parts:
+        return None
+    return parts[0]
+
+
+def _build_user_story_permalink(base_url: str, project_slug: str | None, ref: int | None) -> str | None:
+    if not project_slug or ref is None:
+        return None
+    return f"{base_url.rstrip('/')}/project/{project_slug}/us/{ref}"

@@ -1,14 +1,17 @@
-# Kaiten Matrix Bridge
+# Taiga Matrix Bridge
 
-Production-style MVP bridge between Kaiten and an existing self-hosted Matrix stack.
+Production-style MVP bridge between Taiga and a self-hosted Matrix stack.
+
+The repository path on the server remains `/opt/kaiten-matrix-bridge` for compatibility, but the code now targets Taiga.
 
 ## What it does
 
-- Accepts Kaiten webhooks at `POST /webhook/kaiten/{slug}`.
-- Formats incoming Kaiten events and posts them into the mapped Matrix room.
+- Accepts Taiga webhooks and posts readable notifications to Matrix.
 - Runs a Matrix bot that auto-joins invites and listens in mapped rooms.
-- Supports `!help`, `!task Title | description`, and `!card 123`.
-- Creates and retrieves Kaiten cards through the Kaiten API.
+- Supports:
+  - `!help`
+  - `!task Title | description`
+- Creates Taiga user stories through the Taiga API.
 
 ## Repository layout
 
@@ -18,7 +21,7 @@ kaiten-matrix-bridge/
 │  ├─ __init__.py
 │  ├─ main.py
 │  ├─ config.py
-│  ├─ kaiten.py
+│  ├─ taiga.py
 │  ├─ matrix_bot.py
 │  ├─ formatter.py
 │  └─ models.py
@@ -28,17 +31,22 @@ kaiten-matrix-bridge/
 ├─ .env.example
 ├─ config.example.yaml
 ├─ README.md
+├─ .dockerignore
 └─ .gitignore
 ```
 
 ## Environment variables
 
-Copy `.env.example` to `.env` and fill these values:
+Copy `.env.example` to `.env` and fill the real values:
 
 ```env
-KAITEN_API_BASE_URL=https://YOURCOMPANY.kaiten.ru/api/latest
-KAITEN_WEB_BASE_URL=https://YOURCOMPANY.kaiten.ru
-KAITEN_TOKEN=
+TAIGA_BASE_URL=https://tree.taiga.io
+TAIGA_API_URL=https://api.taiga.io/api/v1
+TAIGA_USERNAME=
+TAIGA_PASSWORD=
+TAIGA_TOKEN=
+TAIGA_PROJECT_ID=
+TAIGA_PROJECT_SLUG=
 
 MATRIX_HOMESERVER=https://matrix.fishingteam.su
 MATRIX_USER_ID=@kbot:matrix.fishingteam.su
@@ -52,34 +60,28 @@ DATA_DIR=/app/data
 
 Notes:
 
-- If `KAITEN_API_BASE_URL` is set to the bare Kaiten domain, the app appends `/api/latest` automatically.
-- `BRIDGE_SECRET` is the default webhook secret for every project mapping unless a project-specific `webhook_secret` is set in `config.yaml`.
+- `TAIGA_TOKEN` is optional. If set, the bridge uses it directly. Otherwise it logs in with `TAIGA_USERNAME` and `TAIGA_PASSWORD`.
+- `TAIGA_PROJECT_ID` and `TAIGA_PROJECT_SLUG` act as defaults. Per-room values in `config.yaml` override them.
+- `BRIDGE_SECRET` is used both for manual webhook testing and as the Taiga webhook HMAC key.
 
 ## Mapping file
 
-Copy `config.example.yaml` to `config.yaml` and adjust the room/board mapping:
+Copy `config.example.yaml` to `config.yaml` and adjust the room/project mapping:
 
 ```yaml
 projects:
   alpha:
     room_id: "!REAL_MATRIX_ROOM_ID:matrix.fishingteam.su"
-    board_id: 123
-    position: 2
+    project_id: 1784454
+    project_slug: denbay0-test
 ```
 
 Supported project fields:
 
-- `room_id`: Matrix room id where Kaiten events are posted.
-- `board_id`: Kaiten board id used for `!task`.
-- `position`: `1` for first in cell, `2` for last in cell.
-- `column_id`: optional fixed column for new cards.
-- `lane_id`: optional fixed lane for new cards.
-- `webhook_secret`: optional per-project secret override.
-
-Behavior:
-
-- Webhook to `/webhook/kaiten/alpha` posts to the configured `room_id`.
-- Matrix commands in that room create cards in `board_id`.
+- `room_id`: Matrix room id where Taiga events are posted.
+- `project_id`: Taiga numeric project id used for `!task`.
+- `project_slug`: Taiga project slug used for link building fallback.
+- `webhook_secret`: optional per-room webhook secret override.
 
 ## Local run
 
@@ -105,11 +107,11 @@ nano config.yaml
 docker compose -f compose.yml up -d --build
 ```
 
-The service listens on `0.0.0.0:8000` inside the container and is exposed on host port `8060`.
+The service listens on `0.0.0.0:8000` in the container and is published on host port `8060`.
 
-## Reverse proxy via existing Caddy
+## Reverse proxy via Caddy
 
-Add this block to `/opt/matrix-stack/caddy/Caddyfile`:
+The bridge is exposed through the existing Caddy instance in `/opt/matrix-stack/caddy/Caddyfile`:
 
 ```caddy
 bridge.fishingteam.su {
@@ -117,21 +119,14 @@ bridge.fishingteam.su {
 }
 ```
 
-Then restart Caddy from the Matrix stack:
+If you change the Caddyfile, restart Caddy:
 
 ```bash
 cd /opt/matrix-stack
-sudo docker compose restart caddy
+docker compose restart caddy
 ```
 
-If the existing `caddy` service does not already resolve `host.docker.internal`, add this under the `caddy` service in `/opt/matrix-stack/docker-compose.yml`:
-
-```yaml
-extra_hosts:
-  - "host.docker.internal:host-gateway"
-```
-
-## Bot behavior
+## Matrix bot behavior
 
 - Uses a dedicated Matrix account such as `@kbot:matrix.fishingteam.su`.
 - Auto-joins invited rooms.
@@ -143,14 +138,10 @@ Create the Matrix bot account if needed:
 
 ```bash
 cd /opt/matrix-stack
-sudo docker compose exec synapse register_new_matrix_user http://localhost:8008 -c /data/homeserver.yaml
+docker compose exec synapse register_new_matrix_user \
+  http://localhost:8008 \
+  -c /data/homeserver.yaml
 ```
-
-Recommended values:
-
-- username: `kbot`
-- password: choose a strong real password
-- admin: `no`
 
 ## HTTP API
 
@@ -158,29 +149,30 @@ Recommended values:
 
 Returns JSON health status.
 
-### `POST /webhook/kaiten/{slug}`
+`HEAD /healthz` is also supported.
 
-Auth methods:
+### `POST /webhook/taiga/{slug}`
+
+Primary auth mode for real Taiga webhooks:
+
+- header `X-TAIGA-WEBHOOK-SIGNATURE`
+- value is `hex(hmac_sha1(raw_body, BRIDGE_SECRET))`
+
+Fallback auth modes for manual testing:
 
 - query string `?secret=...`
 - or header `X-Bridge-Secret: ...`
 
-Example:
+Compatibility alias:
 
-```bash
-curl -X POST "https://bridge.fishingteam.su/webhook/kaiten/alpha?secret=YOUR_BRIDGE_SECRET" \
-  -H "Content-Type: application/json" \
-  -d '{"event":"card.created","card":{"id":101,"title":"Test card"}}'
-```
+- `POST /webhook/kaiten/{slug}` points to the same handler
 
 Example Matrix output:
 
 ```text
-[Kaiten] card.created: #101 Test card
-https://YOURCOMPANY.kaiten.ru/cards/101
+[Taiga] created user story: #72 Demo story - denbay0
+https://tree.taiga.io/project/denbay0-test/us/72
 ```
-
-If a comment exists in the payload, it is included as a second line.
 
 ## Matrix commands
 
@@ -190,63 +182,119 @@ Shows the available commands.
 
 ### `!task Title | description`
 
-Creates a new card in the mapped Kaiten board and replies with:
+Creates a Taiga user story in the mapped project and replies with:
 
 ```text
-Created card #101: Prepare landing page
-https://YOURCOMPANY.kaiten.ru/cards/101
+Created Taiga user story #72: Demo story
+https://tree.taiga.io/project/denbay0-test/us/72
 ```
 
-### `!card 123`
+## How to get Taiga token and project id
 
-Looks up a card by id and replies with title and link.
+### Auth token
 
-## Testing checklist
-
-### 1. Local/HTTP health
+Official Taiga auth flow:
 
 ```bash
-curl http://127.0.0.1:8060/healthz
-curl https://bridge.fishingteam.su/healthz
-```
-
-### 2. Kaiten webhook test
-
-```bash
-curl -X POST "https://bridge.fishingteam.su/webhook/kaiten/alpha?secret=YOUR_BRIDGE_SECRET" \
+curl -X POST https://api.taiga.io/api/v1/auth \
   -H "Content-Type: application/json" \
-  -d '{"event":"card.created","card":{"id":101,"title":"Test card"}}'
+  -d '{
+    "type": "normal",
+    "username": "YOUR_USERNAME",
+    "password": "YOUR_PASSWORD"
+  }'
 ```
 
-Expected result:
+The response contains `auth_token`. You can set that token in `TAIGA_TOKEN` if you prefer token-based auth for the bridge.
 
-- HTTP 200
-- Matrix room receives a readable message
+### Project id
 
-### 3. Matrix command test
+Resolver by slug:
 
-Send this in the mapped Matrix room:
+```bash
+curl "https://api.taiga.io/api/v1/resolver?project=YOUR_PROJECT_SLUG"
+```
+
+Example response:
+
+```json
+{"project": 1784454}
+```
+
+You can also fetch full public project metadata:
+
+```bash
+curl "https://api.taiga.io/api/v1/projects/by_slug?slug=YOUR_PROJECT_SLUG"
+```
+
+## Manual webhook test
+
+Quick secret-based test:
+
+```bash
+curl -X POST "https://bridge.fishingteam.su/webhook/taiga/alpha?secret=YOUR_BRIDGE_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "userstory",
+    "action": "create",
+    "data": {
+      "ref": 72,
+      "subject": "Manual webhook test",
+      "permalink": "https://tree.taiga.io/project/denbay0-test/us/72"
+    },
+    "by": {
+      "username": "denbay0"
+    }
+  }'
+```
+
+Real HMAC-style test:
+
+```bash
+BODY='{"type":"userstory","action":"create","data":{"ref":72,"subject":"Manual webhook test","permalink":"https://tree.taiga.io/project/denbay0-test/us/72"},"by":{"username":"denbay0"}}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha1 -hmac "$BRIDGE_SECRET" -hex | sed 's/^.* //')
+curl -X POST "https://bridge.fishingteam.su/webhook/taiga/alpha" \
+  -H "Content-Type: application/json" \
+  -H "X-TAIGA-WEBHOOK-SIGNATURE: $SIG" \
+  -d "$BODY"
+```
+
+## Smoke test
+
+### 1. Health
+
+```bash
+curl https://bridge.fishingteam.su/healthz
+curl -I https://bridge.fishingteam.su/healthz
+```
+
+### 2. Matrix bot
+
+Invite `@kbot:matrix.fishingteam.su` to the target room if it is not there yet.
+
+### 3. Matrix commands
+
+In the mapped Matrix room:
 
 ```text
-!task Test from Matrix | created by bot command
+!help
+!task Test from Matrix | created by the bridge
 ```
 
 Expected result:
 
-- a card is created in Kaiten
-- room receives confirmation with link
+- bot replies in the room
+- Taiga user story is created
+- reply contains a working Taiga link
 
-### 4. Card lookup test
+### 4. Taiga webhook
 
-Send this in the Matrix room:
+Configure a Taiga webhook with:
 
-```text
-!card 101
-```
+- URL: `https://bridge.fishingteam.su/webhook/taiga/alpha`
+- secret key: same value as `BRIDGE_SECRET` or `projects.alpha.webhook_secret`
 
-Expected result:
-
-- room receives card title + link
+Then create or update a user story in Taiga and verify the Matrix room receives a notification.
 
 ## Operational commands
 
@@ -278,40 +326,18 @@ cd /opt/kaiten-matrix-bridge
 docker compose -f compose.yml down
 ```
 
-## Exact deploy steps for this server
+## Exact server location
 
-1. Ensure `bridge.fishingteam.su` resolves to `79.174.90.22`. If missing, create DNS record `A bridge -> 79.174.90.22`.
-2. Put this repository on the server at `/opt/kaiten-matrix-bridge`.
-3. Create `.env` and `config.yaml` from the examples.
-4. Make sure the Matrix bot account exists and is invited to the target non-encrypted room.
-5. Start the bridge:
-
-   ```bash
-   cd /opt/kaiten-matrix-bridge
-   docker compose -f compose.yml up -d --build
-   ```
-
-6. Add the Caddy route in `/opt/matrix-stack/caddy/Caddyfile`.
-7. Restart Caddy:
-
-   ```bash
-   cd /opt/matrix-stack
-   sudo docker compose restart caddy
-   ```
-
-8. Verify:
-
-   ```bash
-   curl http://127.0.0.1:8060/healthz
-   curl -I https://bridge.fishingteam.su/healthz
-   ```
+- Bridge code: `/opt/kaiten-matrix-bridge`
+- Caddy config: `/opt/matrix-stack/caddy/Caddyfile`
+- Existing Caddy backup: `/opt/matrix-stack/caddy/Caddyfile.bak.kaiten-bridge`
 
 ## Extending after MVP
 
 The code is intentionally split into small modules so the next features fit cleanly:
 
-- `!comment <card_id> | text`
-- `!move <card_id> | column_or_status`
-- richer webhook normalization and formatting
-- Matrix user to Kaiten user mapping
-- tests for command parsing and formatters
+- `!comment <us_ref> | text`
+- `!move <us_ref> | status`
+- richer webhook formatting
+- Matrix user to Taiga user mapping
+- tests for command parsing and webhook normalization

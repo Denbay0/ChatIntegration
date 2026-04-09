@@ -1,0 +1,13 @@
+services:
+  kaiten-matrix-bridge:
+    build:
+      context: .
+    container_name: kaiten-matrix-bridge
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8060:8000"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data

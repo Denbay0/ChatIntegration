@@ -1,0 +1,10 @@
+projects:
+  alpha:
+    room_id: "!REAL_MATRIX_ROOM_ID:matrix.fishingteam.su"
+    board_id: 123
+    position: 2
+    # Optional if you want a more specific placement:
+    # column_id: 456
+    # lane_id: 789
+    # Optional per-project secret override:
+    # webhook_secret: replace-with-project-secret

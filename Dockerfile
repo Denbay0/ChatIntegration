@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app /app/app
+COPY tools /app/tools
 COPY .env.example /app/.env.example
 COPY config.example.yaml /app/config.example.yaml
 COPY README.md /app/README.md

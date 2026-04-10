@@ -11,6 +11,14 @@ class ProjectMapping(BaseModel):
     room_id: str
     project_id: int | None = None
     project_slug: str | None = None
+    project_name: str | None = None
+    project_url: str | None = None
+    widget_id: str | None = None
+    widget_name: str | None = None
+    widget_url: str | None = None
+    webhook_url: str | None = None
+    header_event_id: str | None = None
+    user_mappings: dict[str, str] = Field(default_factory=dict)
     webhook_secret: str | None = None
 
     @field_validator("project_slug")
@@ -20,11 +28,48 @@ class ProjectMapping(BaseModel):
             return None
         return value.strip().strip("/")
 
+    @field_validator("project_name", "project_url", "widget_id", "widget_name", "widget_url", "webhook_url", "header_event_id", "webhook_secret")
+    @classmethod
+    def normalize_text_value(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        return text or None
+
     def resolved_project_id(self, default_project_id: int | None) -> int | None:
         return self.project_id if self.project_id is not None else default_project_id
 
     def resolved_project_slug(self, default_project_slug: str | None) -> str | None:
         return self.project_slug or default_project_slug
+
+    def resolved_project_name(self, default_project_name: str | None = None) -> str | None:
+        return self.project_name or default_project_name
+
+    def resolved_project_url(self, base_url: str, default_project_slug: str | None) -> str:
+        if self.project_url:
+            return self.project_url
+        project_slug = self.resolved_project_slug(default_project_slug)
+        if not project_slug:
+            return base_url.rstrip("/")
+        return f"{base_url.rstrip('/')}/project/{project_slug}"
+
+    def resolved_board_url(self, base_url: str, default_project_slug: str | None) -> str:
+        project_slug = self.resolved_project_slug(default_project_slug)
+        if not project_slug:
+            return self.resolved_project_url(base_url, default_project_slug)
+        return f"{base_url.rstrip('/')}/project/{project_slug}/kanban"
+
+    def resolved_widget_id(self, slug: str) -> str:
+        return self.widget_id or f"taiga-{slug}-widget"
+
+    def resolved_widget_name(self, default_name: str) -> str:
+        return self.widget_name or default_name
+
+    def resolved_widget_url(self, bridge_public_url: str, slug: str) -> str:
+        return self.widget_url or f"{bridge_public_url.rstrip('/')}/widget/taiga/{slug}"
+
+    def resolved_webhook_url(self, bridge_public_url: str, slug: str) -> str:
+        return self.webhook_url or f"{bridge_public_url.rstrip('/')}/webhook/taiga/{slug}"
 
 
 class BridgeConfig(BaseModel):
@@ -40,6 +85,9 @@ class BridgeConfig(BaseModel):
             if project.room_id == room_id:
                 return slug, project
         return None
+
+    def set_project(self, slug: str, project: ProjectMapping) -> None:
+        self.projects[slug] = project
 
 
 class TaigaUser(BaseModel):
@@ -69,6 +117,7 @@ class TaigaUserStory(BaseModel):
     permalink: str | None = None
     project_id: int | None = None
     project_slug: str | None = None
+    version: int | None = None
     status_id: int | None = None
     status_name: str | None = None
     status_color: str | None = None
@@ -77,6 +126,8 @@ class TaigaUserStory(BaseModel):
     modified_date: str | None = None
     kanban_order: int | None = None
     owner: TaigaUser | None = None
+    assigned_to_id: int | None = None
+    assigned_to: TaigaUser | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -115,6 +166,7 @@ class NormalizedWebhookEvent(BaseModel):
     title: str | None = None
     actor_name: str | None = None
     comment_text: str | None = None
+    change_summary: str | None = None
     link: str | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
 

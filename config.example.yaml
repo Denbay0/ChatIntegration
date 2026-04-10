@@ -3,5 +3,13 @@ projects:
     room_id: "!REAL_MATRIX_ROOM_ID:matrix.fishingteam.su"
     project_id: 1784454
     project_slug: denbay0-test
+    project_name: Test Project
+    project_url: https://tree.taiga.io/project/denbay0-test
+    widget_id: taiga-alpha-widget
+    widget_name: Доска Taiga
+    widget_url: https://bridge.fishingteam.su/widget/taiga/alpha
+    webhook_url: https://bridge.fishingteam.su/webhook/taiga/alpha
+    # user_mappings:
+    #   "@denis:matrix.fishingteam.su": "Denbay0"
     # Optional per-project secret override:
     # webhook_secret: replace-with-project-secret

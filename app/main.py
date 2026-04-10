@@ -88,6 +88,30 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.post("/admin/reload-config")
+    async def reload_config(
+        request: Request,
+        x_bridge_secret: str | None = Header(default=None, alias="X-Bridge-Secret"),
+    ) -> JSONResponse:
+        runtime = _runtime_from_request(request)
+        if not x_bridge_secret or not hmac.compare_digest(
+            x_bridge_secret,
+            runtime.settings.bridge_secret.get_secret_value(),
+        ):
+            raise HTTPException(status_code=401, detail="Missing or invalid bridge secret")
+
+        bridge_config = load_bridge_config(runtime.settings.config_path)
+        runtime.bridge_config = bridge_config
+        runtime.matrix_bot.bridge_config = bridge_config
+        LOGGER.info("Bridge config reloaded from %s", runtime.settings.config_path)
+        return JSONResponse(
+            content={
+                "status": "ok",
+                "project_count": len(bridge_config.projects),
+                "slugs": sorted(bridge_config.projects.keys()),
+            }
+        )
+
     @app.post("/webhook/taiga/{slug}")
     @app.post("/webhook/kaiten/{slug}")
     async def taiga_webhook(
@@ -234,8 +258,8 @@ def _validate_webhook_auth(
 async def _build_widget_view(runtime: BridgeRuntime, slug: str, project: ProjectMapping) -> WidgetViewModel:
     project_slug = project.resolved_project_slug(runtime.settings.taiga_project_slug) or slug
     project_id = project.resolved_project_id(runtime.settings.taiga_project_id) or 0
-    board_url = f"{runtime.settings.taiga_base_url}/project/{project_slug}/kanban"
-    project_url = f"{runtime.settings.taiga_base_url}/project/{project_slug}"
+    board_url = project.resolved_board_url(runtime.settings.taiga_base_url, runtime.settings.taiga_project_slug)
+    project_url = project.resolved_project_url(runtime.settings.taiga_base_url, runtime.settings.taiga_project_slug)
     frame_ancestors = runtime.settings.widget_frame_ancestors.split()
     try:
         embed_support = await inspect_embed_support(board_url, frame_ancestors)

@@ -30,7 +30,10 @@ class Settings(BaseSettings):
     matrix_homeserver: str = "https://matrix.fishingteam.su"
     matrix_user_id: str = "@kbot:matrix.fishingteam.su"
     matrix_password: SecretStr
+    matrix_state_user_id: str | None = None
+    matrix_state_password: SecretStr | None = None
 
+    bridge_public_url: str = "https://bridge.fishingteam.su"
     bridge_secret: SecretStr
     log_level: str = "INFO"
     config_path: Path = Field(default=Path("config.yaml"))
@@ -47,10 +50,18 @@ class Settings(BaseSettings):
         suffix = "/api/v1" if parsed.path in ("", "/") else f"{parsed.path}/api/v1"
         return parsed._replace(path=suffix).geturl().rstrip("/")
 
-    @field_validator("taiga_base_url", "matrix_homeserver")
+    @field_validator("taiga_base_url", "matrix_homeserver", "bridge_public_url")
     @classmethod
     def trim_trailing_slash(cls, value: str) -> str:
         return value.rstrip("/")
+
+    @field_validator("matrix_state_user_id")
+    @classmethod
+    def normalize_optional_user_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        return text or None
 
     @field_validator("taiga_project_slug")
     @classmethod
@@ -74,6 +85,13 @@ def load_bridge_config(path: Path) -> BridgeConfig:
         raw_data = yaml.safe_load(handle) or {}
 
     return BridgeConfig.model_validate(raw_data)
+
+
+def save_bridge_config(path: Path, config: BridgeConfig) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    serialized = config.model_dump(mode="json", exclude_none=True)
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(serialized, handle, allow_unicode=True, sort_keys=False)
 
 
 def setup_logging(log_level: str) -> None:

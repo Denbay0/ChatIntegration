@@ -1,142 +1,112 @@
 # Taiga Matrix Bridge
 
-Русскоязычный bridge между Matrix и Taiga для уже работающего self-hosted Matrix/Element стека. Серверный путь проекта сохранён как `/opt/kaiten-matrix-bridge` ради совместимости, но сервис уже полностью работает с Taiga и room widget.
+Русскоязычный bridge между Matrix/Element и Taiga с project-room flow: бот, room widget, webhook-уведомления, bind script для новых комнат и короткая шапка-инструкция в самой комнате.
 
-## Что уже работает
+## Что умеет сейчас
 
-- webhook из Taiga пишет уведомления в Matrix-комнату
-- бот в комнате понимает `!help` и `!task Заголовок | описание`
-- задачи создаются в Taiga как `user story`
-- в комнате встроен self-hosted widget с русским интерфейсом
+- webhook из Taiga пишет обновления обратно в Matrix
+- бот понимает `!help`, `!task`, `!tasks`, `!open`, `!my`, `!comment`
+- задачи создаются из чата и из widget
+- widget в комнате показывает одну главную секцию `Задачи проекта` без дублирования `Фокус по задачам` / `Последние задачи`
+- bind script подключает новую комнату к проекту Taiga через один flow
+- bridge можно перегрузить по config без общего рестарта контейнера
 
-## Боевой контур
+## Project Room Template
 
-- Element Web: `https://fishingteam.su`
-- Matrix homeserver: `https://matrix.fishingteam.su`
-- Health check bridge: `https://bridge.fishingteam.su/healthz`
-- Widget page: `https://bridge.fishingteam.su/widget/taiga/alpha`
-- Полная доска Taiga: `https://tree.taiga.io/project/denbay0-test/kanban`
-- Комната Matrix: `!EQxiFrVAIdKTSLtAJD:matrix.fishingteam.su`
-- Серверный путь: `/opt/kaiten-matrix-bridge`
+После bind room получает:
 
-## Почему внутри комнаты не встроена сама cloud-доска Taiga
-
-Taiga Cloud запрещает прямое iframe-встраивание страницы доски:
-
-- URL: `https://tree.taiga.io/project/denbay0-test/kanban`
-- blocker: `X-Frame-Options: DENY`
-
-Поэтому bridge использует self-hosted widget page на нашем домене и не пытается обходить защитные заголовки Taiga Cloud.
-
-## Widget в комнате
-
-- URL виджета: `https://bridge.fishingteam.su/widget/taiga/alpha`
-- Widget id: `taiga-alpha-widget`
-- Event type виджета: `im.vector.modular.widgets`
-- Layout event type: `io.element.widgets.layout`
-- Текущее имя в room state: `Taiga Board`
-
-Виджет показывает:
-
-- название и статус проекта
-- кнопку открытия полной доски Taiga
-- список последних задач
-- сводку по статусам
-- форму быстрого создания задачи
-- подсказки, как открыть виджет и как вернуться обратно к чату
-
-## Как открыть виджет в Matrix
-
-Открой комнату проекта и найди виджет `Taiga Board` в панели виджетов/приложений комнаты. В зависимости от версии Element он может быть закреплён сверху или открываться через информацию о комнате.
-
-Если виджет не виден:
-
-1. Открой комнату `!EQxiFrVAIdKTSLtAJD:matrix.fishingteam.su`.
-2. Открой информацию о комнате или секцию widgets/apps.
-3. Выбери `Taiga Board`.
-
-## Как вернуться к чату
-
-Точное название кнопки зависит от версии Element, но логика одна и та же:
-
-1. Сверни или закрой панель виджета.
-2. Либо просто переключись обратно на сообщения комнаты.
-
-Сам widget тоже показывает эти подсказки прямо внутри интерфейса.
-
-## Полезные действия
-
-- открыть полную доску: кнопка `Открыть доску`
-- создать задачу из виджета: форма `Создать задачу`
-- создать задачу из чата: `!task Заголовок | описание`
-- проверить связь с Taiga: создать или изменить user story и дождаться webhook-уведомления в комнате
-
-## Язык интерфейса
-
-Что русифицировано нами:
-
-- сам widget UI
-- кнопки, формы, статусы, пустые состояния и ошибки
-- тексты help/UX внутри страницы виджета
-- обращения bridge к Taiga API через `Accept-Language: ru`
-
-Что не управляется сервером:
-
-- язык самого клиента Element задаётся пользователем в `All Settings -> Account -> Language and Region`
-- текущее имя room widget пока остаётся `Taiga Board`, потому что power policy комнаты требует уровень `50` для state-событий, а локальному техпользователю Synapse смог дать только `0`
-
-## HTTP API
-
-### `GET /healthz`
-
-Возвращает JSON-статус сервиса. `HEAD /healthz` тоже поддерживается.
-
-### `POST /webhook/taiga/{slug}`
-
-Основной режим авторизации webhook из Taiga:
-
-- заголовок `X-TAIGA-WEBHOOK-SIGNATURE`
-- значение `hex(hmac_sha1(raw_body, BRIDGE_SECRET))`
-
-Ручные fallback-варианты для тестов:
-
-- query `?secret=...`
-- либо заголовок `X-Bridge-Secret: ...`
-
-Совместимость со старым URL сохранена:
-
-- `POST /webhook/kaiten/{slug}`
-
-### `GET /widget/taiga/{slug}`
-
-Отдаёт self-hosted HTML widget page, пригодную для встраивания в Element.
-
-### `POST /widget/taiga/{slug}/task`
-
-Создаёт Taiga user story из формы виджета.
-
-Пример JSON:
-
-```json
-{
-  "title": "Тестовая задача",
-  "description": "Описание"
-}
-```
+- bot `@kbot:matrix.fishingteam.su`
+- widget `Доска Taiga` в room state
+- русскую шапку-инструкцию в виде notice-сообщения
+- mapping `room_id ↔ project_id/project_slug ↔ widget_url ↔ webhook_url`
+- webhook Taiga для обратных уведомлений
 
 ## Команды бота
 
-### `!help`
+- `!help` / `!помощь` — показать подсказку
+- `!task Заголовок | описание` / `!задача ...` — создать задачу
+- `!tasks` / `!задачи` — показать последние задачи проекта
+- `!open` / `!открыть` — дать ссылки на проект и доску
+- `!my` / `!мои` — показать задачи, назначенные текущему пользователю
+- `!comment 123 | текст` — добавить комментарий к задаче Taiga
 
-Показывает список доступных команд.
+`!my` работает в best-effort режиме: сначала смотрит `user_mappings` из `config.yaml`, затем пробует сопоставить Matrix user id и display name с `username/full_name/email` пользователя Taiga.
 
-### `!task Заголовок | описание`
+## Widget
 
-Создаёт user story в привязанном проекте Taiga и отвечает ссылкой в ту же комнату.
+Widget открывается по адресу `https://bridge.fishingteam.su/widget/taiga/{slug}` и в комнате живёт как state event типа `im.vector.modular.widgets`.
+
+Теперь внутри панели:
+
+- заголовок проекта и быстрые действия
+- блок `Задачи проекта` с переключателями `Новые`, `В работе`, `Последние`
+- компактная сводка и прокручиваемые колонки `По статусам`
+- форма `Создать задачу`
+- короткая русская инструкция
+- скрытый блок `Техническая информация`
+
+Два почти одинаковых списка больше не показываются одновременно. Основной рабочий срез теперь собран в одной секции.
+
+## Быстрое подключение новой комнаты
+
+Предпочтительный способ: запускать bind script внутри контейнера bridge.
+
+### Создать новую проектную комнату
+
+```bash
+docker compose exec -T kaiten-matrix-bridge python tools/bind_room.py \
+  --slug backend \
+  --create-room \
+  --project-id 123456 \
+  --project-slug backend \
+  --project-name "Backend" \
+  --invite-user @owner:matrix.fishingteam.su
+```
+
+### Привязать уже существующую комнату
+
+```bash
+docker compose exec -T kaiten-matrix-bridge python tools/bind_room.py \
+  --slug backend \
+  --room-id '!AAAA:matrix.fishingteam.su' \
+  --project-id 123456 \
+  --project-slug backend \
+  --project-name "Backend"
+```
+
+### Что делает `bind_room.py`
+
+1. Проверяет и/или подтягивает данные проекта из Taiga.
+2. Создаёт новую комнату или использует существующую.
+3. Приглашает бота в комнату.
+4. Записывает widget state и layout.
+5. Публикует русскую шапку-инструкцию и закрепляет её.
+6. Создаёт или обновляет webhook в Taiga.
+7. Обновляет `config.yaml`.
+8. Вызывает `POST /admin/reload-config` у bridge.
+9. Печатает итоговый JSON со `slug`, `room_id`, `widget_url`, `webhook_url`.
+
+### Важное ограничение для существующих комнат
+
+Для bind уже существующей комнаты сервисный пользователь должен иметь доступ к комнате и право писать state events. Если бот сам не может этого сделать, задайте отдельного state/admin пользователя через `MATRIX_STATE_USER_ID` и `MATRIX_STATE_PASSWORD`.
+
+## Русская шапка комнаты
+
+Bind script публикует заметное сообщение с:
+
+- кратким описанием комнаты
+- подсказкой, где открыть widget
+- командами `!task`, `!tasks`, `!open`, `!my`, `!comment`
+- ссылками на проект и доску Taiga
+- кратким описанием того, что делает бот
+
+Последняя опубликованная шапка сохраняется в `header_event_id`, чтобы при повторном bind можно было закрепить именно актуальное сообщение.
 
 ## Конфигурация
 
-Скопируй `.env.example` в `.env` и заполни реальные значения:
+### `.env`
+
+Скопируйте `.env.example` в `.env` и заполните значения:
 
 ```env
 TAIGA_BASE_URL=https://tree.taiga.io
@@ -145,13 +115,16 @@ TAIGA_USERNAME=
 TAIGA_PASSWORD=
 TAIGA_TOKEN=
 TAIGA_ACCEPT_LANGUAGE=ru
-TAIGA_PROJECT_ID=1784454
-TAIGA_PROJECT_SLUG=denbay0-test
+TAIGA_PROJECT_ID=
+TAIGA_PROJECT_SLUG=
 
 MATRIX_HOMESERVER=https://matrix.fishingteam.su
 MATRIX_USER_ID=@kbot:matrix.fishingteam.su
 MATRIX_PASSWORD=
+MATRIX_STATE_USER_ID=
+MATRIX_STATE_PASSWORD=
 
+BRIDGE_PUBLIC_URL=https://bridge.fishingteam.su
 BRIDGE_SECRET=
 LOG_LEVEL=INFO
 CONFIG_PATH=/app/config.yaml
@@ -159,31 +132,51 @@ DATA_DIR=/app/data
 WIDGET_FRAME_ANCESTORS=https://fishingteam.su https://matrix.fishingteam.su
 ```
 
-Замечания:
+Пояснения:
 
-- `TAIGA_TOKEN` необязателен
-- если `TAIGA_TOKEN` пустой, bridge логинится через `TAIGA_USERNAME` и `TAIGA_PASSWORD`
-- `TAIGA_ACCEPT_LANGUAGE=ru` просит Taiga API отдавать переводимые части ответа по-русски
-- `WIDGET_FRAME_ANCESTORS` ограничивает, кто может встраивать widget page
+- `MATRIX_STATE_*` необязательны; если они не заданы, bind flow будет работать от имени бота
+- `BRIDGE_PUBLIC_URL` нужен для генерации `widget_url` и `webhook_url`
+- `TAIGA_ACCEPT_LANGUAGE=ru` просит Taiga API возвращать переводимые части по-русски
 
-## `config.yaml`
+### `config.yaml`
 
-Скопируй `config.example.yaml` в `config.yaml` и привяжи комнату к проекту:
+Пример:
 
 ```yaml
 projects:
   alpha:
-    room_id: "!EQxiFrVAIdKTSLtAJD:matrix.fishingteam.su"
+    room_id: "!ROOM:matrix.fishingteam.su"
     project_id: 1784454
     project_slug: denbay0-test
+    project_name: Demo project
+    project_url: https://tree.taiga.io/project/denbay0-test
+    widget_id: taiga-alpha-widget
+    widget_name: Доска Taiga
+    widget_url: https://bridge.fishingteam.su/widget/taiga/alpha
+    webhook_url: https://bridge.fishingteam.su/webhook/taiga/alpha
+    header_event_id: "$event:matrix.fishingteam.su"
+    user_mappings:
+      "@denis:matrix.fishingteam.su": "Denbay0"
+    webhook_secret: replace-with-project-secret
 ```
 
 Поля:
 
-- `room_id`: комната Matrix для бота и webhook-уведомлений
-- `project_id`: numeric id проекта Taiga
-- `project_slug`: slug проекта для ссылок и widget page
-- `webhook_secret`: необязательный секрет только для этого slug
+- `room_id` — Matrix-комната проекта
+- `project_id`, `project_slug`, `project_name`, `project_url` — данные Taiga-проекта
+- `widget_id`, `widget_name`, `widget_url` — room widget
+- `webhook_url`, `webhook_secret` — входящий webhook bridge
+- `header_event_id` — последнее заметное room-message header notice
+- `user_mappings` — явное сопоставление Matrix user id к Taiga username/email
+
+## HTTP API
+
+- `GET /healthz` — статус bridge
+- `POST /webhook/taiga/{slug}` — основной webhook endpoint
+- `POST /webhook/kaiten/{slug}` — совместимость со старым URL
+- `GET /widget/taiga/{slug}` — HTML widget page
+- `POST /widget/taiga/{slug}/task` — создание задачи из widget
+- `POST /admin/reload-config` — внутренний reload `config.yaml` по `X-Bridge-Secret`
 
 ## Локальный запуск
 
@@ -196,115 +189,37 @@ pip install -r requirements.txt
 uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
 ```
 
-## Деплой на сервер
+## Docker / deploy
 
 ```bash
-cd /opt/kaiten-matrix-bridge
 docker compose up -d --build
 ```
 
-Если на сервере снова будут проблемы с pull базового образа, можно использовать уже проверенный fallback:
+`compose.yml` монтирует `config.yaml` в контейнер на запись, чтобы bind script мог обновлять mapping прямо на сервере.
 
-```bash
-cd /opt/kaiten-matrix-bridge
-docker build -f Dockerfile.localbase -t kaiten-matrix-bridge-kaiten-matrix-bridge:latest .
-docker compose up -d --force-recreate
-```
+## Smoke check
 
-## Операционные команды
-
-### Запуск / пересборка
-
-```bash
-cd /opt/kaiten-matrix-bridge
-docker compose up -d --build
-```
-
-### Логи
-
-```bash
-cd /opt/kaiten-matrix-bridge
-docker compose logs -f
-```
-
-### Перезапуск
-
-```bash
-cd /opt/kaiten-matrix-bridge
-docker compose restart
-```
-
-### Остановка
-
-```bash
-cd /opt/kaiten-matrix-bridge
-docker compose down
-```
-
-## Как получить auth и project id в Taiga
-
-### Получить auth token
-
-```bash
-curl -X POST https://api.taiga.io/api/v1/auth \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "normal",
-    "username": "YOUR_USERNAME",
-    "password": "YOUR_PASSWORD"
-  }'
-```
-
-### Узнать project id по slug
-
-```bash
-curl "https://api.taiga.io/api/v1/resolver?project=YOUR_PROJECT_SLUG"
-```
-
-Пример ответа:
-
-```json
-{"project": 1784454}
-```
-
-## Как настроить webhook в Taiga
-
-Используй URL:
-
-```text
-https://bridge.fishingteam.su/webhook/taiga/alpha
-```
-
-В поле `key` в Taiga укажи то же значение, что и `BRIDGE_SECRET` в `.env` bridge.
-
-## Smoke test
-
-### Health
+### Проверить, что сервис жив
 
 ```bash
 curl https://bridge.fishingteam.su/healthz
 curl -I https://bridge.fishingteam.su/widget/taiga/alpha
 ```
 
-### Проверка в Matrix
+### Проверить текущую комнату
 
-В комнате отправь:
+1. Открыть room widget.
+2. Выполнить `!help`.
+3. Выполнить `!task Заголовок | описание`.
+4. Выполнить `!tasks`.
+5. Выполнить `!open`.
+6. Выполнить `!comment 123 | текст`.
+7. Убедиться, что webhook возвращает событие в комнату.
 
-```text
-!help
-!task Тестовая задача | проверить bridge
-```
+### Проверить новую тестовую комнату
 
-### Проверка widget
-
-Открой:
-
-```text
-https://bridge.fishingteam.su/widget/taiga/alpha
-```
-
-Затем создай задачу через форму.
-
-### Проверка webhook
-
-Создай или измени user story в проекте Taiga и убедись, что в комнате приходит уведомление `[Taiga] ...`.
+1. Запустить `tools/bind_room.py`.
+2. Убедиться, что bot приглашён.
+3. Проверить, что widget появился.
+4. Проверить, что шапка опубликована и закреплена.
+5. Выполнить те же команды в новой комнате.

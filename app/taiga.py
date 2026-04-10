@@ -81,6 +81,58 @@ class TaigaClient:
             fallback_project_slug=project_slug,
         )
 
+    async def get_user_story_by_ref(self, project: ProjectMapping, ref: int) -> TaigaUserStory:
+        project_id, project_slug = await self._resolve_project_context(project)
+        resolved_project_slug = project_slug
+        if not resolved_project_slug:
+            resolved_project_slug = (await self.get_project(project)).slug
+
+        data = await self._request(
+            "GET",
+            "/userstories/by_ref",
+            auth=True,
+            params={
+                "project__slug": resolved_project_slug,
+                "ref": ref,
+            },
+        )
+        if not isinstance(data, dict):
+            raise TaigaApiError(f"Unexpected user story payload for ref '{ref}'.", payload=data)
+
+        return self._parse_user_story(
+            data,
+            fallback_project_id=project_id,
+            fallback_project_slug=resolved_project_slug,
+        )
+
+    async def add_comment_to_user_story(
+        self,
+        project: ProjectMapping,
+        ref: int,
+        comment: str,
+    ) -> TaigaUserStory:
+        story = await self.get_user_story_by_ref(project, ref)
+        if story.version is None:
+            raise TaigaApiError("Taiga user story response did not include version.", payload=story.raw)
+
+        data = await self._request(
+            "PATCH",
+            f"/userstories/{story.id}",
+            auth=True,
+            json={
+                "comment": comment,
+                "version": story.version,
+            },
+        )
+        if not isinstance(data, dict):
+            raise TaigaApiError("Unexpected Taiga response while adding comment.", payload=data)
+
+        return self._parse_user_story(
+            data,
+            fallback_project_id=story.project_id,
+            fallback_project_slug=story.project_slug,
+        )
+
     async def get_project(self, project: ProjectMapping) -> TaigaProject:
         project_id, project_slug = await self._resolve_project_context(project)
         if project_slug:
@@ -134,6 +186,18 @@ class TaigaClient:
         ]
         stories.sort(key=lambda story: story.modified_date or story.created_date or "", reverse=True)
         return stories[:limit]
+
+    async def list_project_users(self, project: ProjectMapping) -> list[TaigaUser]:
+        project_id, _ = await self._resolve_project_context(project)
+        data = await self._request(
+            "GET",
+            "/users",
+            auth=True,
+            params={"project": project_id},
+        )
+        if not isinstance(data, list):
+            raise TaigaApiError("Unexpected user list payload from Taiga.")
+        return [TaigaUser.model_validate(item) for item in data if isinstance(item, dict)]
 
     async def resolve_project_id(self, project_slug: str) -> int:
         data = await self._request("GET", "/resolver", auth=False, params={"project": project_slug})
@@ -323,6 +387,8 @@ class TaigaClient:
     ) -> TaigaUserStory:
         owner_payload = payload.get("owner_extra_info") or payload.get("owner")
         owner = TaigaUser.model_validate(owner_payload) if isinstance(owner_payload, dict) else None
+        assigned_to_payload = payload.get("assigned_to_extra_info") or payload.get("assigned_to")
+        assigned_to = TaigaUser.model_validate(assigned_to_payload) if isinstance(assigned_to_payload, dict) else None
 
         permalink = _string_or_none(payload.get("permalink"))
         project_slug = (
@@ -365,6 +431,7 @@ class TaigaClient:
             permalink=permalink,
             project_id=project_id,
             project_slug=project_slug,
+            version=_maybe_int(payload.get("version")),
             status_id=status_id,
             status_name=status_name,
             status_color=status_color,
@@ -373,6 +440,8 @@ class TaigaClient:
             modified_date=_string_or_none(payload.get("modified_date")),
             kanban_order=_maybe_int(payload.get("kanban_order")),
             owner=owner,
+            assigned_to_id=_maybe_int(payload.get("assigned_to")),
+            assigned_to=assigned_to,
             raw=payload,
         )
 

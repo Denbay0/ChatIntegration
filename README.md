@@ -178,6 +178,44 @@ projects:
 - `POST /widget/taiga/{slug}/task` — создание задачи из widget
 - `POST /admin/reload-config` — внутренний reload `config.yaml` по `X-Bridge-Secret`
 
+## MatrixRTC check
+
+Для быстрой диагностики MatrixRTC есть утилита `tools/check_matrixrtc.py`. Она помогает отделить server-side проблему от stale mobile client config.
+
+Что проверяет:
+
+- `/.well-known/matrix/client`
+- `/.well-known/element/element.json`
+- `/_matrix/client/unstable/org.matrix.msc4143/rtc/transports` без токена
+- тот же endpoint с токеном после Matrix login
+- совпадение `livekit_service_url` между `.well-known` и `rtc_transports`
+- доступность `call.widget_url` и `call.fishingteam.su/config.json`
+- `element_call.use_exclusively`, если дать путь к `config.json`
+- health-check для LiveKit JWT и SFU
+
+Пример:
+
+```bash
+python tools/check_matrixrtc.py \
+  --homeserver https://matrix.fishingteam.su \
+  --client-domain matrix.fishingteam.su \
+  --user alice \
+  --password secret \
+  --call-url https://call.fishingteam.su \
+  --element-config /opt/matrix-stack/element/config.json \
+  --jwt-health-url https://rtc.fishingteam.su/livekit/jwt/healthz \
+  --sfu-url https://sfu.fishingteam.su
+```
+
+Ожидаемый healthy baseline:
+
+- `.well-known` отвечает `200`
+- `/.well-known/element/element.json` отвечает `200`
+- `rtc/transports` без токена отвечает `401 M_MISSING_TOKEN`
+- `rtc/transports` с токеном отвечает `200`
+- `call.widget_url` указывает на живой `Element Call` frontend
+- `livekit_service_url` в `.well-known` и transport payload совпадает
+
 ## Локальный запуск
 
 ```bash

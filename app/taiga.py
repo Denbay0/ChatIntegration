@@ -37,7 +37,8 @@ class TaigaClient:
         self.password = password
         self.default_project_id = default_project_id
         self.default_project_slug = default_project_slug
-        self._access_token = token.strip() if token else None
+        normalized_token = token.strip() if token else ""
+        self._access_token = normalized_token or None
         self._refresh_token: str | None = None
         self._auth_lock = asyncio.Lock()
         self._client = httpx.AsyncClient(
@@ -135,10 +136,12 @@ class TaigaClient:
 
     async def get_project(self, project: ProjectMapping) -> TaigaProject:
         project_id, project_slug = await self._resolve_project_context(project)
-        if project_slug:
+        if project_id is not None:
+            data = await self._request("GET", f"/projects/{project_id}", auth=True)
+        elif project_slug:
             data = await self.get_project_by_slug(project_slug)
         else:
-            data = await self._request("GET", f"/projects/{project_id}", auth=True)
+            raise TaigaApiError("Taiga project id is not configured.")
 
         if not isinstance(data, dict):
             raise TaigaApiError("Unexpected Taiga project payload.")
@@ -210,7 +213,7 @@ class TaigaClient:
         data = await self._request(
             "GET",
             "/projects/by_slug",
-            auth=False,
+            auth=True,
             params={"slug": project_slug},
         )
         if not isinstance(data, dict):
